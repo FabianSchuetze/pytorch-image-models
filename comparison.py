@@ -175,6 +175,7 @@ def generate_activation_scales(module, dataset):
     # return y_orig, y
 
 def main():
+    breakpoint()
     model = load()
     dataset = load_val_dataset()
     get_quantized_weights(model, dataset)

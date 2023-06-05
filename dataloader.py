@@ -1,20 +1,19 @@
 import math
+import os
 
 import torch
-from torchvision import datasets
-from datasets import load_dataset
-from datasets.utils.info_utils import VerificationMode
 import torchvision.transforms as transforms
 from PIL import Image
 from typing import Optional, Callable, Any, Tuple
 
-def load_data(example):
-    image = example['image'][0]
-    example["image"] = [image.convert("RGB")]
-    return example
+from classes import IMAGENET2012_CLASSES
 
-ds = load_dataset('/workspace/imagenet-1k/', split='validation', verification_mode=VerificationMode.NO_CHECKS)
-ds.set_transform(load_data)
+# def load_data(example):
+    # image = example['image'][0]
+    # example["image"] = [image.convert("RGB")]
+    # return example
+
+# ds = load_dataset('/workspace/imagenet-1k/', split='validation', verification_mode=VerificationMode.NO_CHECKS)
 
 
 class DatasetFolder(torch.utils.data.Dataset):
@@ -44,10 +43,17 @@ class DatasetFolder(torch.utils.data.Dataset):
         targets (list): The class_index value for each image in the dataset
     """
 
-    def __init__( self, huggingsface_ds, transform) -> None:
+    def __init__(self, folder, transform) -> None:
         super().__init__()
-        self.transform =transform
-        self.ds = huggingsface_ds
+        self.files = [os.path.join(folder, i) for i in os.listdir(folder)
+                      if '.JPEG' in i]
+        self.transform = transform
+
+    def load_label(self, path):
+        root, _ = os.path.splitext(path)
+        _, synset_id = os.path.basename(root).rsplit("_", 1)
+        label = IMAGENET2012_CLASSES[synset_id]
+        return label
 
     def __getitem__(self, index: int) -> Tuple[Any, Any]:
         """
@@ -57,8 +63,12 @@ class DatasetFolder(torch.utils.data.Dataset):
         Returns:
             tuple: (sample, target) where target is class_index of the target class.
         """
-        example = self.ds[index]
-        sample, target = example['image'], example['label']
+        breakpoint()
+        file = self.files[index]
+        target = self.load_label(file)
+        sample = Image.open(file)
+        # example = self.ds[index]
+        # sample, target = example['image'], example['label']
         # path, target = self.samples[index]
         # sample = self.loader(path)
         if self.transform is not None:
@@ -69,7 +79,7 @@ class DatasetFolder(torch.utils.data.Dataset):
         return sample, target
 
     def __len__(self) -> int:
-        return len(self.ds)
+        return len(self.files)
 
 
 def build_transform(input_size=224,
@@ -104,12 +114,13 @@ def build_transform(input_size=224,
     t.append(transforms.Normalize(mean, std))
     return transforms.Compose(t)
 
+
 mean = (0.5, 0.5, 0.5)
 std = (0.5, 0.5, 0.5)
 crop_pct = 0.9
 
 def load_val_dataset():
     train_transform = build_transform(mean=mean, std=std, crop_pct=crop_pct)
-    test = DatasetFolder(ds, train_transform)
+    test = DatasetFolder('/workspace/imagenet-1k/data/', train_transform)
     return test
 
