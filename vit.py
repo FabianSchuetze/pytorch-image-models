@@ -18,11 +18,11 @@ from torch_int.nn.linear import (
 from torch_int.nn.bmm import BMM_S8T_S8N_S8T, BMM_S8T_S8N_F32T
 from torch_int.nn.fused import LayerNormQ
 
-from detectron2.modeling.backbone.vit import Attention, Block
-from detectron2.modeling.backbone.utils import (
-        window_partition,
-        window_unpartition,
-        add_decomposed_rel_pos)
+# from detectron2.modeling.backbone.vit import Attention, Block
+# from detectron2.modeling.backbone.utils import (
+        # window_partition,
+        # window_unpartition,
+        # add_decomposed_rel_pos)
 
 
 class Int8Attention(nn.Module):
@@ -69,7 +69,7 @@ class Int8Attention(nn.Module):
                 use_rel_pos=True,
                 input_size=(14, 14))
         in_features = module.qkv.in_features
-        out_features = module.qkv.out_features  // 3
+        # out_features = module.qkv.out_features  // 3
         q_module = nn.Linear(in_features=in_features,
                 out_features=out_features,device='cuda')
         k_module = nn.Linear(in_features=in_features,
@@ -107,11 +107,6 @@ class Int8Attention(nn.Module):
             module.proj, proj_input_scale)
         int8_module.qk_bmm = BMM_S8T_S8N_F32T.from_scale(
             q_output_scale, k_output_scale)
-        #attn_input_scale: 0.0415
-        #k_output_scale: 0.067
-        #v_output_scale: 0.066
-        #q_output_scale: 0.0103
-        #fuse the module.scale (scale for q @ k) into the operator
 
         if int8_module.use_rel_pos:
             int8_module.rel_pos_h = module.rel_pos_h
@@ -487,3 +482,11 @@ class VITINT8(nn.Module):
         x = self.forward_features(x)
         x = self.forward_head(x)
         return x
+
+    @staticmethod
+    def from_float(module, decoder_layer_scales):
+        int8module = VITINT8()
+        for i, layer in enumerate(module.blocks):
+            int8module.blocks[i] = Int8Block.from_float(layter, 
+                    decoder_layer_scales[i])
+        return int8module

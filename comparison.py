@@ -5,9 +5,9 @@ import torch
 from torch import nn
 import timm
 
-#from vit import Int8Attention, Int8Block
+from vit import Int8Attention, Int8Block, VITINT8
 from dataloader import load_val_dataset
-
+#
 #from torch_int.nn.linear import W8A8B8O8Linear
 
 # Load the model
@@ -15,6 +15,40 @@ from dataloader import load_val_dataset
 # Load a input data
 # Get the output
 # Compare with quantized module
+
+class AverageMeter(object):
+    """Computes and stores the average and current value"""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val, n=1):
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
+
+def accuracy(output, target, topk=(1, )):
+    """Computes the precision@k for the specified values of k"""
+    maxk = max(topk)
+    batch_size = target.size(0)
+
+    _, pred = output.topk(maxk, 1, True, True)
+    pred = pred.t()
+    correct = pred.eq(target.reshape(1, -1).expand_as(pred))
+
+    res = []
+    for k in topk:
+        correct_k = correct[:k].reshape(-1).float().sum(0)
+        res.append(correct_k.mul_(100.0 / batch_size))
+    return res
+
 
 @torch.no_grad()
 def smooth_ln_fcs(ln, fcs, act_scales, alpha=0.5):
@@ -48,10 +82,8 @@ def smooth_ln_fcs(ln, fcs, act_scales, alpha=0.5):
 
 def load():
     model = timm.create_model('vit_large_patch16_224', pretrained=True)
-    #model = model.to('cuda')
-    #block = model.backbone.net.blocks[0]
-    #x = torch.load('/tmp/x.pt')
-    return model, x
+    model = model.to('cuda')
+    return model
 
 
 def get_quantized_weights(model, dataset):
@@ -68,6 +100,7 @@ def get_quantized_weights(model, dataset):
                 act_dict[name]["input"], x.detach().abs().max().item())
         if isinstance(y, tuple):
             y = y[0]
+        breakpoint()
         if name not in act_dict or "output" not in act_dict[name]:
             act_dict[name]["output"] = y.detach().abs().max().item()
         else:
@@ -78,29 +111,35 @@ def get_quantized_weights(model, dataset):
         if isinstance(m, torch.nn.Linear):
             hooks.append(m.register_forward_hook(
                 partial(stat_io_hook, name=name)))
-    for data in dataset:
-        _ = model(data)  # add evaluation component
+    top1 = AverageMeter()
+    for idx, data in enumerate(dataset):
+        imgs, target = data
+        imgs = imgs.to(torch.device('cuda'))
+        target = target.to(torch.device('cuda'))
+        with torch.no_grad():
+            pred_target = model(imgs)  # add evaluation component
+        prec1, _ = accuracy(pred_target, target, topk=(1,5))
+        top1.update(prec1.data.item(), imgs.size(0))
+        if idx % 100 == 0:
+            print(f"{idx}: {top1.avg:.3f}")
     for hook in hooks:
         hook.remove()
     layer_scales = []
-    for idx in range(model.config.num_hidden_layers):
+    for idx in range(23):
         scale_dict = {}
         scale_dict["attn_input_scale"] = act_dict[
-            f"model.decoder.layers.{idx}.self_attn.q_proj"]['input'] / 127
-        scale_dict["q_output_scale"] = act_dict[
-            f"model.decoder.layers.{idx}.self_attn.q_proj"]['output'] / 127
+            f"blocks.{idx}.attn.qkv"]['input'] / 127
+        scale_dict["attn_output_scale"] = act_dict[
+            f"blocks.{idx}.attn.qkv"]['output'] / 127
         scale_dict["k_output_scale"] = act_dict[
-            f"model.decoder.layers.{idx}.self_attn.k_proj"]['output'] / 127
-        scale_dict["v_output_scale"] = act_dict[
-            f"model.decoder.layers.{idx}.self_attn.v_proj"]['output'] / 127
-        scale_dict["out_input_scale"] = act_dict[
-            f"model.decoder.layers.{idx}.self_attn.out_proj"]['input'] / 127
+            f"blocks.{idx}.attn.proj"]['input'] / 127
         scale_dict["fc1_input_scale"] = act_dict[
-            f"model.decoder.layers.{idx}.fc1"]['input'] / 127
+            f"blocks.{idx}.mlp.fc1"]['input'] / 127
         scale_dict["fc2_input_scale"] = act_dict[
-            f"model.decoder.layers.{idx}.fc2"]["input"] / 127
+            f"blocks.{idx}.mlp.fc2"]["input"] / 127
         layer_scales.append(scale_dict)
     return layer_scales
+        #fuse the module.scale (scale for q @ k) into the operator
 
 
 
@@ -175,10 +214,11 @@ def generate_activation_scales(module, dataset):
     # return y_orig, y
 
 def main():
-    breakpoint()
-    model = load()
     dataset = load_val_dataset()
-    get_quantized_weights(model, dataset)
+    model = load()
+    breakpoint()
+    scales = get_quantized_weights(model, dataset)
+    int8_model = VITINT8.from_float(model, scales)
 
     # smooth_module(orig_block,x )
     # generate_quantized_module(orig_block, x)

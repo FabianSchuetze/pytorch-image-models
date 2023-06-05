@@ -47,6 +47,8 @@ class DatasetFolder(torch.utils.data.Dataset):
         super().__init__()
         self.files = [os.path.join(folder, i) for i in os.listdir(folder)
                       if '.JPEG' in i]
+        self.labels = IMAGENET2012_CLASSES.values()
+        self.label_idx = {i: idx for idx, i in enumerate(self.labels)}
         self.transform = transform
 
     def load_label(self, path):
@@ -63,10 +65,11 @@ class DatasetFolder(torch.utils.data.Dataset):
         Returns:
             tuple: (sample, target) where target is class_index of the target class.
         """
-        breakpoint()
         file = self.files[index]
         target = self.load_label(file)
+        label = self.label_idx[target]
         sample = Image.open(file)
+        sample = sample.convert("RGB")
         # example = self.ds[index]
         # sample, target = example['image'], example['label']
         # path, target = self.samples[index]
@@ -76,7 +79,7 @@ class DatasetFolder(torch.utils.data.Dataset):
         # if self.target_transform is not None:
             # target = self.target_transform(target)
 
-        return sample, target
+        return sample, label
 
     def __len__(self) -> int:
         return len(self.files)
@@ -121,6 +124,11 @@ crop_pct = 0.9
 
 def load_val_dataset():
     train_transform = build_transform(mean=mean, std=std, crop_pct=crop_pct)
-    test = DatasetFolder('/workspace/imagenet-1k/data/', train_transform)
-    return test
+    test = DatasetFolder('/workspace/imagenet/', train_transform)
+    loader = torch.utils.data.DataLoader(
+            test,
+            batch_size=100,
+            shuffle=False,
+            num_workers=4)
+    return loader
 
