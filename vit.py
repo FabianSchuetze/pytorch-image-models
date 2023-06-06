@@ -114,10 +114,11 @@ class Int8Attention(nn.Module):
             k_module, input_scale, k_output_scale)
         int8_module.v = W8A8B8O8Linear.from_float(
             v_module, input_scale, v_output_scale)
-        int8_module.proj = W8A8BFP32OFP32Linear.from_float(
-            module.proj, proj_input_scale)
-        int8_module.qk_bmm = BMM_S8T_S8N_F32T.from_scale(
-            q_output_scale, k_output_scale)
+        int8_module.proj = module.proj
+        # int8_module.proj = W8A8BFP32OFP32Linear.from_float(
+            # module.proj, proj_input_scale)
+        # int8_module.qk_bmm = BMM_S8T_S8N_F32T.from_scale(
+            # q_output_scale, k_output_scale)
 
         if int8_module.use_rel_pos:
             int8_module.rel_pos_h = module.rel_pos_h
@@ -157,19 +158,22 @@ class Int8Attention(nn.Module):
         # different layout because pv_bmm takes a col major matrix as second
         # arg
         v = self.v(x).reshape(B, N, self.num_heads, self.head_dim)\
-                .permute(0, 2, 3, 1)
+                .permute(0, 2, 1, 3)
                 # .reshape(B * self.num_heads, 64, N)
-        anew = torch.zeros((B * self.num_heads, 196, 224),
-                           dtype=torch.int8, device='cuda')
-        bnew = torch.zeros((B * self.num_heads, 64, 224),
-                           dtype=torch.int8, device='cuda')
-        bnew[:, :, :196] = v
-        anew[:, :, :196] = attn_probs
-        x = self.pv_bmm(anew, bnew)
+        # anew = torch.zeros((B * self.num_heads, 196, 224),
+                           # dtype=torch.int8, device='cuda')
+        # bnew = torch.zeros((B * self.num_heads, 64, 224),
+                           # dtype=torch.int8, device='cuda')
+        # bnew[:, :, :196] = v
+        # anew[:, :, :196] = attn_probs
+        x = attn_probs.float() @ v.float() * self.pv_bmm.a
+        # x = self.pv_bmm(anew, bnew)
 
-        x = x.reshape(B, self.num_heads, H, W, -1)\
-                .permute(0, 2, 3, 1, 4)\
-                .reshape(B, H, W, -1)
+        x = x.transpose(1,2).reshape(B,N,C)
+
+        # x = x.reshape(B, self.num_heads, H, W, -1)\
+                # .permute(0, 2, 3, 1, 4)\
+                # .reshape(B, H, W, -1)
         x = self.proj(x)
         return x
 
@@ -255,13 +259,14 @@ class Int8Block(nn.Module):
         int8_module.attn = Int8Attention.from_float(
             module.attn, attn_input_scale, q_output_scale, k_output_scale,
             v_output_scale, proj_input_scale)
-        int8_module.norm2 = LayerNormQ.from_float(
-            module.norm2, fc1_input_scale)
-        int8_module.mlp.fc1 = W8A8BFP32OFP32Linear.from_float(
-            module.mlp.fc1, fc1_input_scale)
-        # int8_module.mlp.fc1 = W8A8B8O8LinearGELU.from_float(
+        int8_module.mlp = module.mlp
+        # int8_module.norm2 = LayerNormQ.from_float(
+            # module.norm2, fc1_input_scale)
+        # int8_module.mlp.fc1 = W8A8BFP32OFP32Linear.from_float(
+            # module.mlp.fc1, fc1_input_scale)
+        # # int8_module.mlp.fc1 = W8A8B8O8LinearGELU.from_float(
         # module.mlp.fc1, fc1_input_scale, fc2_input_scale)
-        int8_module.mlp.fc2 = module.mlp.fc2
+        # int8_module.mlp.fc2 = module.mlp.fc2
         # int8_module.mlp.fc2 = W8A8BFP32OFP32Linear.from_float(
         # module.mlp.fc2, fc2_input_scale)
         return int8_module
@@ -523,6 +528,7 @@ class VITINT8(nn.Module):
             depth=len(module.blocks),
             embed_dim=module.patch_embed.proj.out_channels,
             num_heads=module.blocks[0].attn.num_heads)
+        int8module.load_state_dict(module.state_dict(), strict=False)
         for i, layer in enumerate(module.blocks):
             int8module.blocks[i] = Int8Block.from_float(layer,
                                                         **layer_scales[i])
