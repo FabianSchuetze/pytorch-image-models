@@ -86,6 +86,23 @@ def load():
     return model
 
 
+def evaluation(model, dataset):
+    top1 = AverageMeter()
+    breakpoint()
+    for idx, data in enumerate(dataset):
+        if idx > 10:
+            break
+        imgs, target = data
+        imgs = imgs.to(torch.device('cuda'))
+        target = target.to(torch.device('cuda'))
+        with torch.no_grad():
+            pred_target = model(imgs)  # add evaluation component
+        prec1, _ = accuracy(pred_target, target, topk=(1,5))
+        top1.update(prec1.data.item(), imgs.size(0))
+        if idx % 100 == 0:
+            print(f"{idx}: {top1.avg:.3f}")
+
+
 def get_quantized_weights(model, dataset):
     model.eval()
     act_dict = defaultdict(dict)
@@ -100,48 +117,58 @@ def get_quantized_weights(model, dataset):
                 act_dict[name]["input"], x.detach().abs().max().item())
         if isinstance(y, tuple):
             y = y[0]
-        breakpoint()
         if name not in act_dict or "output" not in act_dict[name]:
-            act_dict[name]["output"] = y.detach().abs().max().item()
+            if not ('qkv' in name):
+                act_dict[name]["output"] = y.detach().abs().max().item()
+            else:
+                out_features = y.shape[-1] // 3
+                q_output = y[:, :, :out_features].abs().max().item()
+                k_output = y[:, :, out_features: 2 * out_features].abs().max().item()
+                v_output = y[:, :, 2 * out_features:].abs().max().item()
+                act_dict[name]['q_output'] = q_output
+                act_dict[name]['k_output'] = k_output
+                act_dict[name]['v_output'] = v_output
         else:
-            act_dict[name]["output"] = max(
-                act_dict[name]["output"], y.detach().abs().max().item())
+            if not ('qkv' in name):
+                act_dict[name]["output"] = max(
+                    act_dict[name]["output"], y.detach().abs().max().item())
+            else:
+                out_features = y.shape[-1] // 3
+                q_output = y[:, :, :out_features].abs().max().item()
+                k_output = y[:, :, out_features: 2 * out_features].abs().max().item()
+                v_output = y[:, :, 2 * out_features:].abs().max().item()
+                act_dict[name]['q_output'] = max(act_dict[name]['q_output'], q_output)
+                act_dict[name]['k_output'] = max(act_dict[name]['k_output'], k_output)
+                act_dict[name]['v_output'] = max(act_dict[name]['v_output'], v_output)
     hooks = []
     for name, m in model.named_modules():
         if isinstance(m, torch.nn.Linear):
             hooks.append(m.register_forward_hook(
                 partial(stat_io_hook, name=name)))
-    top1 = AverageMeter()
-    for idx, data in enumerate(dataset):
-        imgs, target = data
-        imgs = imgs.to(torch.device('cuda'))
-        target = target.to(torch.device('cuda'))
-        with torch.no_grad():
-            pred_target = model(imgs)  # add evaluation component
-        prec1, _ = accuracy(pred_target, target, topk=(1,5))
-        top1.update(prec1.data.item(), imgs.size(0))
-        if idx % 100 == 0:
-            print(f"{idx}: {top1.avg:.3f}")
+    evaluation(model, dataset)
     for hook in hooks:
         hook.remove()
     layer_scales = []
-    for idx in range(23):
+    for idx in range(len(model.blocks)):
         scale_dict = {}
         scale_dict["attn_input_scale"] = act_dict[
             f"blocks.{idx}.attn.qkv"]['input'] / 127
-        scale_dict["attn_output_scale"] = act_dict[
-            f"blocks.{idx}.attn.qkv"]['output'] / 127
+        scale_dict["q_output_scale"] = act_dict[
+            f"blocks.{idx}.attn.qkv"]["q_output"] / 127
         scale_dict["k_output_scale"] = act_dict[
-            f"blocks.{idx}.attn.proj"]['input'] / 127
+            f"blocks.{idx}.attn.qkv"]["k_output"] / 127
+        scale_dict["v_output_scale"] = act_dict[
+            f"blocks.{idx}.attn.qkv"]["v_output"] / 127
+        scale_dict["proj_input_scale"] = act_dict[
+            f"blocks.{idx}.attn.proj"]["input"] / 127
+        # scale_dict["k_output_scale"] = k_output_scale
+        # scale_dict["v_output_scale"] = v_output_scale
         scale_dict["fc1_input_scale"] = act_dict[
             f"blocks.{idx}.mlp.fc1"]['input'] / 127
         scale_dict["fc2_input_scale"] = act_dict[
             f"blocks.{idx}.mlp.fc2"]["input"] / 127
         layer_scales.append(scale_dict)
     return layer_scales
-        #fuse the module.scale (scale for q @ k) into the operator
-
-
 
 
 def smooth_module(module, x):
@@ -168,7 +195,7 @@ def smooth_module(module, x):
     fc1 = module.mlp.fc1
     fc1_input_scales = act_dict['mlp.fc1'][0]
     fc1_input_scales = fc1_input_scales.view(-1, 1024).abs().detach()
-    fc1_input_scales= torch.max(fc1_input_scales, dim=0)[0]
+    fc1_input_scales = torch.max(fc1_input_scales, dim=0)[0]
     smooth_ln_fcs(ffn_ln, fc1, fc1_input_scales, alpha)
 
 
@@ -216,9 +243,10 @@ def generate_activation_scales(module, dataset):
 def main():
     dataset = load_val_dataset()
     model = load()
-    breakpoint()
     scales = get_quantized_weights(model, dataset)
     int8_model = VITINT8.from_float(model, scales)
+    int8_model = int8_model.to(torch.device('cuda'))
+    evaluation(int8_model, dataset)
 
     # smooth_module(orig_block,x )
     # generate_quantized_module(orig_block, x)

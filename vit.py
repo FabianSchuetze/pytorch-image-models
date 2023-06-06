@@ -2,34 +2,40 @@ r"""
 Has a quantized VIT
 """
 from functools import partial
-from typing import Optional, Callable, Union, Tuple
+from typing import Optional, Callable, Union, Tuple, Sequence
 
 import torch
 from torch import nn
 
+from timm.models.vision_transformer import (
+        Attention,
+        Block,
+        PatchEmbed,
+        PatchDropout)
+
 from torch_int.nn.linear import (
-        W8A8BFP32OFP32Linear,
-        W8A8B8O8Linear,
-        W8A8B8O8LinearReLU,
-        W8A8B8O8LinearGELU,
-        W8A8BFP32OFP32LinearGELU
-        )
+    W8A8BFP32OFP32Linear,
+    W8A8B8O8Linear,
+    W8A8B8O8LinearReLU,
+    W8A8B8O8LinearGELU,
+    W8A8BFP32OFP32LinearGELU
+)
 
 from torch_int.nn.bmm import BMM_S8T_S8N_S8T, BMM_S8T_S8N_F32T
 from torch_int.nn.fused import LayerNormQ
 
 # from detectron2.modeling.backbone.vit import Attention, Block
 # from detectron2.modeling.backbone.utils import (
-        # window_partition,
-        # window_unpartition,
-        # add_decomposed_rel_pos)
+# window_partition,
+# window_unpartition,
+# add_decomposed_rel_pos)
 
 
 class Int8Attention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(self, embed_dim: int, num_heads: int, use_rel_pos: bool,
-            input_size = None):
+                 input_size=None):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
@@ -52,10 +58,12 @@ class Int8Attention(nn.Module):
         self.proj = W8A8BFP32OFP32Linear(embed_dim, embed_dim)
         self.use_rel_pos = use_rel_pos
         if self.use_rel_pos:
-            # added to the (unnformalized) attention weight.s Keep in float 
+            # added to the (unnformalized) attention weight.s Keep in float
             # to simipliciy, as the unnformalized weights are also in float
-            self.rel_pos_h = nn.Parameter(torch.zeros(2 * input_size[0] - 1, self.head_dim))
-            self.rel_pos_w = nn.Parameter(torch.zeros(2 * input_size[1] - 1, self.head_dim))
+            self.rel_pos_h = nn.Parameter(torch.zeros(
+                2 * input_size[0] - 1, self.head_dim))
+            self.rel_pos_w = nn.Parameter(torch.zeros(
+                2 * input_size[1] - 1, self.head_dim))
 
     @staticmethod
     @torch.no_grad()
@@ -66,37 +74,40 @@ class Int8Attention(nn.Module):
                    v_output_scale: float,
                    proj_input_scale: float):
         int8_module = Int8Attention(module.qkv.in_features, module.num_heads,
-                use_rel_pos=True,
-                input_size=(14, 14))
+                                    use_rel_pos=False,
+                                    input_size=(14, 14))
         in_features = module.qkv.in_features
-        # out_features = module.qkv.out_features  // 3
+        out_features = module.qkv.out_features // 3
         q_module = nn.Linear(in_features=in_features,
-                out_features=out_features,device='cuda')
+                             out_features=out_features, device='cuda')
         k_module = nn.Linear(in_features=in_features,
-                out_features=out_features,
-                device='cuda')
+                             out_features=out_features,
+                             device='cuda')
         v_module = nn.Linear(in_features=in_features,
-                out_features=out_features,
-                device='cuda')
-        q_module.weight = torch.nn.Parameter(module.qkv.weight[:out_features, :])
+                             out_features=out_features,
+                             device='cuda')
+        q_module.weight = torch.nn.Parameter(
+            module.qkv.weight[:out_features, :])
         q_module.bias = torch.nn.Parameter(module.qkv.bias[:out_features])
-        k_module.weight = torch.nn.Parameter(module.qkv.weight[out_features:2*out_features, :])
-        k_module.bias = torch.nn.Parameter(module.qkv.bias[out_features: 2*out_features])
-        v_module.weight = torch.nn.Parameter(module.qkv.weight[2 * out_features:, :])
+        k_module.weight = torch.nn.Parameter(
+            module.qkv.weight[out_features:2 * out_features, :])
+        k_module.bias = torch.nn.Parameter(
+            module.qkv.bias[out_features: 2 * out_features])
+        v_module.weight = torch.nn.Parameter(
+            module.qkv.weight[2 * out_features:, :])
         v_module.bias = torch.nn.Parameter(module.qkv.bias[2 * out_features:])
         # Fuse the scaling into the q_proj output scale
         # The scale is the qkv / scale thing
         # qkv_output_scale = qkv_output_scale * module.scale
         # int8_module.qkv = W8A8B8O8Linear.from_float(
-                # module.qkv, input_scale, q_output_scale)
+        # module.qkv, input_scale, q_output_scale)
         q_output_scale *= module.scale
         q_module.weight *= module.scale
         q_module.bias *= module.scale
-        breakpoint()
         # module.proj.weight *= module.scale
         # module.proj.bias *= module.scale
         # qkv_output_scale = qkv_output_scale
-        #Seperate three linear layers, in particular v has a different scale
+        # Seperate three linear layers, in particular v has a different scale
         int8_module.q = W8A8B8O8Linear.from_float(
             q_module, input_scale, q_output_scale)
         int8_module.k = W8A8B8O8Linear.from_float(
@@ -119,42 +130,53 @@ class Int8Attention(nn.Module):
         return int8_module
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
+        return tensor.view(bsz, seq_len, self.num_heads,
+                           self.head_dim).transpose(1, 2).contiguous()
 
-    def forward(self, x): #25x14x14x1024 (for large)
-        B, H, W, _ = x.shape #H, W: Number of patches
-        q = self.q(x).reshape(B, H * W, self.num_heads, -1).permute(0, 2, 1, 3).reshape(B * self.num_heads, H * W, -1)
-        k = self.k(x).reshape(B, H * W, self.num_heads, -1).permute(0, 2, 1, 3).reshape(B * self.num_heads, H * W, -1)
+    def forward(self, x):  # 25x14x14x1024 (for large)
+        breakpoint()
+        B, N, C = x.shape  # H, W: Number of patches
+        q = self.q(x).reshape(B, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+                # .reshape(B * self.num_heads, N, -1)
+        k = self.k(x).reshape(B, N, self.num_heads, self.head_dim)\
+                .permute(0, 2, 1, 3)
 
-        attn = self.qk_bmm(q, k)
-        #attn shape: 400x196x196
+        attn = q.float() @ k.float().transpose(-2,-1) * self.qk_bmm.a
+        # attn = self.qk_bmm(q, k)
+        # attn shape: 400x196x196
 
         if self.use_rel_pos:
             attn = add_decomposed_rel_pos(attn, (q * 0.01),
                                           self.rel_pos_h, self.rel_pos_w,
                                           (H, W), (H, W))
 
-        attn_probs = nn.functional.softmax(attn, dim=-1) #why not take max for scaling too?
+        attn_probs = nn.functional.softmax(attn, dim=-1)
         attn_probs.mul_(127).round_()
         attn_probs = attn_probs.to(torch.int8)
 
-        #different layout because pv_bmm takes a col major matrix as second arg
-        v = self.v(x).reshape(B, H * W, self.num_heads, -1)\
-                .permute(0, 2, 3, 1)\
-                .reshape(B * self.num_heads, 64, H * W)
-        anew = torch.zeros((B * self.num_heads, 196, 224), dtype=torch.int8, device='cuda')
-        bnew = torch.zeros((B * self.num_heads, 64, 224), dtype=torch.int8, device='cuda')
+        # different layout because pv_bmm takes a col major matrix as second
+        # arg
+        v = self.v(x).reshape(B, N, self.num_heads, self.head_dim)\
+                .permute(0, 2, 3, 1)
+                # .reshape(B * self.num_heads, 64, N)
+        anew = torch.zeros((B * self.num_heads, 196, 224),
+                           dtype=torch.int8, device='cuda')
+        bnew = torch.zeros((B * self.num_heads, 64, 224),
+                           dtype=torch.int8, device='cuda')
         bnew[:, :, :196] = v
         anew[:, :, :196] = attn_probs
         x = self.pv_bmm(anew, bnew)
 
-        x = x.reshape(B, self.num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(B, H, W, -1)
+        x = x.reshape(B, self.num_heads, H, W, -1)\
+                .permute(0, 2, 3, 1, 4)\
+                .reshape(B, H, W, -1)
         x = self.proj(x)
         return x
 
 
 class Int8Block(nn.Module):
-    """Transformer blocks with support of window attention and residual propagation blocks"""
+    """Transformer blocks with support of window attention and residual
+    propagation blocks"""
 
     def __init__(
         self,
@@ -193,34 +215,25 @@ class Int8Block(nn.Module):
         self.attn = Int8Attention(
             dim,
             num_heads=num_heads,
-            use_rel_pos=True,
-            input_size=(14, 14))
-            # qkv_bias=qkv_bias)
-            # use_rel_pos=use_rel_pos,
-            # rel_pos_zero_init=rel_pos_zero_init,
-            # input_size=input_size if window_size == 0 else (window_size, window_size),
-        # )
+            use_rel_pos=False,
+            input_size=0)
 
         from timm.models.layers import DropPath, Mlp
 
-        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        self.drop_path = DropPath(
+            drop_path) if drop_path > 0.0 else nn.Identity()
         self.norm2 = LayerNormQ(dim)
-        self.mlp = Mlp(in_features=dim, hidden_features=int(dim * mlp_ratio), act_layer=act_layer)
+        self.mlp = Mlp(
+            in_features=dim,
+            hidden_features=int(
+                dim * mlp_ratio),
+            act_layer=act_layer)
         # del self.mlp.act
 
         self.window_size = window_size
 
         self.use_residual_block = use_residual_block
         assert not self.use_residual_block, "residual block not yet supported"
-        # if use_residual_block:
-            # # Use a residual block with bottleneck channel as dim // 2
-            # self.residual = ResBottleneckBlock(
-                # in_channels=dim,
-                # out_channels=dim,
-                # bottleneck_channels=dim // 2,
-                # norm="LN",
-                # act_layer=act_layer,
-            # )
 
     @staticmethod
     def from_float(module: Block,
@@ -231,29 +244,30 @@ class Int8Block(nn.Module):
                    proj_input_scale: float,
                    fc1_input_scale: float,
                    fc2_input_scale: float):
-        #this is equation 1 from the paper.
+        # this is equation 1 from the paper.
         int8_module = Int8Block(
             module.attn.qkv.in_features,
             module.attn.num_heads,
-            window_size=module.window_size)
-            # module.attn.qkv.out_features,
-        int8_module.norm1 = LayerNormQ.from_float(module.norm1, attn_input_scale)
+            window_size=0)
+        # module.attn.qkv.out_features,
+        int8_module.norm1 = LayerNormQ.from_float(
+            module.norm1, attn_input_scale)
         int8_module.attn = Int8Attention.from_float(
             module.attn, attn_input_scale, q_output_scale, k_output_scale,
             v_output_scale, proj_input_scale)
-        breakpoint()
         int8_module.norm2 = LayerNormQ.from_float(
             module.norm2, fc1_input_scale)
         int8_module.mlp.fc1 = W8A8BFP32OFP32Linear.from_float(
             module.mlp.fc1, fc1_input_scale)
         # int8_module.mlp.fc1 = W8A8B8O8LinearGELU.from_float(
-            # module.mlp.fc1, fc1_input_scale, fc2_input_scale)
+        # module.mlp.fc1, fc1_input_scale, fc2_input_scale)
         int8_module.mlp.fc2 = module.mlp.fc2
         # int8_module.mlp.fc2 = W8A8BFP32OFP32Linear.from_float(
-            # module.mlp.fc2, fc2_input_scale)
+        # module.mlp.fc2, fc2_input_scale)
         return int8_module
 
     def forward(self, x):
+        breakpoint()
         shortcut = x
         x = self.norm1(x)
         # Window partition
@@ -261,7 +275,7 @@ class Int8Block(nn.Module):
             H, W = x.shape[1], x.shape[2]
             x, pad_hw = window_partition(x, self.window_size)
 
-        x = self.attn(x) #2% error
+        x = self.attn(x)  # 2% error
         breakpoint()
         # Reverse window partition
         if self.window_size > 0:
@@ -355,7 +369,8 @@ class VITINT8(nn.Module):
 
         self.num_classes = num_classes
         self.global_pool = global_pool
-        self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
+        # num_features for consistency with other models
+        self.num_features = self.embed_dim = embed_dim
         self.num_prefix_tokens = 1 if class_token else 0
         self.no_embed_class = no_embed_class
         self.grad_checkpointing = False
@@ -369,9 +384,11 @@ class VITINT8(nn.Module):
         )
         num_patches = self.patch_embed.num_patches
 
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim)) if class_token else None
+        self.cls_token = nn.Parameter(torch.zeros(
+            1, 1, embed_dim)) if class_token else None
         embed_len = num_patches if no_embed_class else num_patches + self.num_prefix_tokens
-        self.pos_embed = nn.Parameter(torch.randn(1, embed_len, embed_dim) * .02)
+        self.pos_embed = nn.Parameter(
+            torch.randn(1, embed_len, embed_dim) * .02)
         self.pos_drop = nn.Dropout(p=pos_drop_rate)
         if patch_drop_rate > 0:
             self.patch_drop = PatchDropout(
@@ -393,7 +410,9 @@ class VITINT8(nn.Module):
         # Classifier Head
         self.fc_norm = norm_layer(embed_dim) if use_fc_norm else nn.Identity()
         self.head_drop = nn.Dropout(drop_rate)
-        self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
+        self.head = nn.Linear(
+            self.embed_dim,
+            num_classes) if num_classes > 0 else nn.Identity()
 
         if weight_init != 'skip':
             self.init_weights(weight_init)
@@ -401,15 +420,20 @@ class VITINT8(nn.Module):
     def _pos_embed(self, x):
         if self.no_embed_class:
             # deit-3, updated JAX (big vision)
-            # position embedding does not overlap with class token, add then concat
+            # position embedding does not overlap with class token, add then
+            # concat
             x = x + self.pos_embed
             if self.cls_token is not None:
-                x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
+                x = torch.cat(
+                    (self.cls_token.expand(
+                        x.shape[0], -1, -1), x), dim=1)
         else:
             # original timm, JAX, and deit vit impl
             # pos_embed has entry for class token, concat then add
             if self.cls_token is not None:
-                x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
+                x = torch.cat(
+                    (self.cls_token.expand(
+                        x.shape[0], -1, -1), x), dim=1)
             x = x + self.pos_embed
         return self.pos_drop(x)
 
@@ -419,7 +443,12 @@ class VITINT8(nn.Module):
             n: Union[int, Sequence] = 1,
     ):
         outputs, num_blocks = [], len(self.blocks)
-        take_indices = set(range(num_blocks - n, num_blocks) if isinstance(n, int) else n)
+        take_indices = set(
+            range(
+                num_blocks - n,
+                num_blocks) if isinstance(
+                n,
+                int) else n)
 
         # forward pass
         x = self.patch_embed(x)
@@ -444,7 +473,8 @@ class VITINT8(nn.Module):
         """ Intermediate layer accessor (NOTE: This is a WIP experiment).
         Inspired by DINO / DINOv2 interface
         """
-        # take last n blocks if n is an int, if in is a sequence, select by matching indices
+        # take last n blocks if n is an int, if in is a sequence, select by
+        # matching indices
         outputs = self._intermediate_layers(x, n)
         if norm:
             outputs = [self.norm(out) for out in outputs]
@@ -454,7 +484,8 @@ class VITINT8(nn.Module):
         if reshape:
             grid_size = self.patch_embed.grid_size
             outputs = [
-                out.reshape(x.shape[0], grid_size[0], grid_size[1], -1).permute(0, 3, 1, 2).contiguous()
+                out.reshape(
+                    x.shape[0], grid_size[0], grid_size[1], -1).permute(0, 3, 1, 2).contiguous()
                 for out in outputs
             ]
 
@@ -463,6 +494,7 @@ class VITINT8(nn.Module):
         return tuple(outputs)
 
     def forward_features(self, x):
+        breakpoint()
         x = self.patch_embed(x)
         x = self._pos_embed(x)
         x = self.patch_drop(x)
@@ -473,7 +505,8 @@ class VITINT8(nn.Module):
 
     def forward_head(self, x, pre_logits: bool = False):
         if self.global_pool:
-            x = x[:, self.num_prefix_tokens:].mean(dim=1) if self.global_pool == 'avg' else x[:, 0]
+            x = x[:, self.num_prefix_tokens:].mean(
+                dim=1) if self.global_pool == 'avg' else x[:, 0]
         x = self.fc_norm(x)
         x = self.head_drop(x)
         return x if pre_logits else self.head(x)
@@ -484,9 +517,13 @@ class VITINT8(nn.Module):
         return x
 
     @staticmethod
-    def from_float(module, decoder_layer_scales):
-        int8module = VITINT8()
+    def from_float(module, layer_scales):
+        int8module = VITINT8(
+            weight_init='skip',
+            depth=len(module.blocks),
+            embed_dim=module.patch_embed.proj.out_channels,
+            num_heads=module.blocks[0].attn.num_heads)
         for i, layer in enumerate(module.blocks):
-            int8module.blocks[i] = Int8Block.from_float(layter, 
-                    decoder_layer_scales[i])
+            int8module.blocks[i] = Int8Block.from_float(layer,
+                                                        **layer_scales[i])
         return int8module
