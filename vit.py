@@ -263,9 +263,9 @@ class Int8Block(nn.Module):
         int8_module.fc2_input_scale = fc2_input_scale
         # int8_module.mlp.fc1 = W8A8B8O8LinearGELU.from_float(
             # module.mlp.fc1, fc1_input_scale, fc2_input_scale)
-        int8_module.mlp.fc2 = module.mlp.fc2
-        # int8_module.mlp.fc2 = W8A8BFP32OFP32Linear.from_float(
-            # module.mlp.fc2, fc2_input_scale)
+        # int8_module.mlp.fc2 = module.mlp.fc2
+        int8_module.mlp.fc2 = W8A8BFP32OFP32Linear.from_float(
+            module.mlp.fc2, fc2_input_scale)
         return int8_module
 
     def forward(self, x):
@@ -281,20 +281,20 @@ class Int8Block(nn.Module):
         # Reverse window partition
         if self.window_size > 0:
             x = window_unpartition(x, self.window_size, pad_hw, (H, W))
-        # breakpoint()
+        breakpoint()
 
         x = shortcut + self.drop_path(x)
         x_tmp = x
         x = self.norm2(x)
         x = self.mlp.fc1(x)
         # x = self.mlp.act(x)
-        # x = torch.clamp((x / self.fc2_input_scale).round(), -128, 127).to(torch.int8)
-        scale_all = (x.max() - x.min()) / ( 2**8 -1)
-        x_new = torch.clamp((x / scale_all).round(), -128, 127).to(torch.int8)
-        new_layer = W8A8BFP32OFP32Linear.from_float(self.mlp.fc2, scale_all)
-        x = new_layer(x_new)
+        x = torch.clamp((x / self.fc2_input_scale).round(), -128, 127).to(torch.int8)
+        # scale_all = (x.max() - x.min()) / ( 2**8 -1)
+        # x_new = torch.clamp((x / scale_all).round(), -128, 127).to(torch.int8)
+        # new_layer = W8A8BFP32OFP32Linear.from_float(self.mlp.fc2, scale_all)
+        # x = new_layer(x_new)
         # x = self.mlp.drop1(x)
-        # x = self.mlp.fc2(x)
+        x = self.mlp.fc2(x)
         x = self.mlp.drop2(x)
         x = x_tmp + self.drop_path(x)
 

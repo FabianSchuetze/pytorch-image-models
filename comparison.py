@@ -5,16 +5,8 @@ import torch
 from torch import nn
 import timm
 
-from vit import Int8Attention, Int8Block, VITINT8
+from vit import VITINT8
 from dataloader import load_val_dataset
-#
-#from torch_int.nn.linear import W8A8B8O8Linear
-
-# Load the model
-# Get the first layer
-# Load a input data
-# Get the output
-# Compare with quantized module
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
@@ -88,7 +80,7 @@ def load():
 
 def evaluation(model, dataset):
     top1 = AverageMeter()
-    breakpoint()
+    # breakpoint()
     for idx, data in enumerate(dataset):
         if idx > 101:
             break
@@ -111,10 +103,28 @@ def get_quantized_weights(model, dataset):
         if isinstance(x, tuple):
             x = x[0]
         if name not in act_dict or "input" not in act_dict[name]:
-            act_dict[name]["input"] = x.detach().abs().max().item()
+            # breakpoint()
+            if not ('mlp.fc2' in name):
+                act_dict[name]["input"] = x.detach().abs().max().item()
+            else: # no bitwaste after GELU
+                # breakpoint()
+                act_dict[name]["input"]= [x.detach().min().item(), x.detach().max().item()]
+                # act_dict[name]["input_max"] = x.detach().max().item()
         else:
-            act_dict[name]["input"] = max(
-                act_dict[name]["input"], x.detach().abs().max().item())
+            if not ('mlp.fc2' in name):
+                act_dict[name]["input"] = max(
+                    act_dict[name]["input"], x.detach().abs().max().item())
+            else:
+                # breakpoint()
+                tmp_min = x.detach().min().item()
+                tmp_max = x.detach().max().item()
+                new_min = min(act_dict[name]["input"][0], tmp_min)
+                new_max = max(act_dict[name]["input"][1], tmp_max)
+                act_dict[name]["input"] = [new_min, new_max]
+                    # act_dict[name]["input_min"], tmp_min)
+                # act_dict[name]["input_max"] = max(
+                    # act_dict[name]["input_max"], tmp_max)
+
         if isinstance(y, tuple):
             y = y[0]
         if name not in act_dict or "output" not in act_dict[name]:
@@ -165,8 +175,8 @@ def get_quantized_weights(model, dataset):
         # scale_dict["v_output_scale"] = v_output_scale
         scale_dict["fc1_input_scale"] = act_dict[
             f"blocks.{idx}.mlp.fc1"]['input'] / 127
-        scale_dict["fc2_input_scale"] = act_dict[
-            f"blocks.{idx}.mlp.fc2"]["input"] / 127
+        fc2_scales = act_dict[f"blocks.{idx}.mlp.fc2"]["input"]
+        scale_dict["fc2_input_scale"] = (fc2_scales[1] - fc2_scales[0]) / (2**8 -1)
         layer_scales.append(scale_dict)
     return layer_scales
 
@@ -243,7 +253,9 @@ def generate_activation_scales(module, dataset):
 def main():
     dataset = load_val_dataset()
     model = load()
-    scales = get_quantized_weights(model, dataset)
+    # scales = get_quantized_weights(model, dataset)
+    # breakpoint()
+    scales = torch.load('/tmp/scales.pt')
     int8_model = VITINT8.from_float(model, scales)
     int8_model = int8_model.to(torch.device('cuda'))
     evaluation(int8_model, dataset)
