@@ -98,27 +98,22 @@ class Int8Attention(nn.Module):
         v_module.bias = torch.nn.Parameter(module.qkv.bias[2 * out_features:])
         # Fuse the scaling into the q_proj output scale
         # The scale is the qkv / scale thing
-        # qkv_output_scale = qkv_output_scale * module.scale
-        # int8_module.qkv = W8A8B8O8Linear.from_float(
-        # module.qkv, input_scale, q_output_scale)
         q_output_scale *= module.scale
         q_module.weight *= module.scale
         q_module.bias *= module.scale
-        # module.proj.weight *= module.scale
-        # module.proj.bias *= module.scale
-        # qkv_output_scale = qkv_output_scale
-        # Seperate three linear layers, in particular v has a different scale
-        int8_module.q = W8A8B8O8Linear.from_float(
-            q_module, input_scale, q_output_scale)
-        int8_module.k = W8A8B8O8Linear.from_float(
-            k_module, input_scale, k_output_scale)
-        int8_module.v = W8A8B8O8Linear.from_float(
-            v_module, input_scale, v_output_scale)
+        # int8_module.q = W8A8B8O8Linear.from_float(
+            # q_module, input_scale, q_output_scale)
+        # int8_module.k = W8A8B8O8Linear.from_float(
+            # k_module, input_scale, k_output_scale)
+        # int8_module.v = W8A8B8O8Linear.from_float(
+            # v_module, input_scale, v_output_scale)
         int8_module.proj = module.proj
-        # int8_module.proj = W8A8BFP32OFP32Linear.from_float(
-            # module.proj, proj_input_scale)
-        # int8_module.qk_bmm = BMM_S8T_S8N_F32T.from_scale(
-            # q_output_scale, k_output_scale)
+        int8_module.q = W8A8BFP32OFP32Linear.from_float(
+            q_module, input_scale)
+        int8_module.k = W8A8BFP32OFP32Linear.from_float(
+           k_module, input_scale)
+        int8_module.v = W8A8BFP32OFP32Linear.from_float(
+            v_module, input_scale)
 
         if int8_module.use_rel_pos:
             int8_module.rel_pos_h = module.rel_pos_h
@@ -135,14 +130,14 @@ class Int8Attention(nn.Module):
                            self.head_dim).transpose(1, 2).contiguous()
 
     def forward(self, x):  # 25x14x14x1024 (for large)
-        breakpoint()
+        # breakpoint()
         B, N, C = x.shape  # H, W: Number of patches
         q = self.q(x).reshape(B, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
                 # .reshape(B * self.num_heads, N, -1)
         k = self.k(x).reshape(B, N, self.num_heads, self.head_dim)\
                 .permute(0, 2, 1, 3)
 
-        attn = q.float() @ k.float().transpose(-2,-1) * self.qk_bmm.a
+        attn = q.float() @ k.float().transpose(-2,-1)
         # attn = self.qk_bmm(q, k)
         # attn shape: 400x196x196
 
@@ -152,8 +147,8 @@ class Int8Attention(nn.Module):
                                           (H, W), (H, W))
 
         attn_probs = nn.functional.softmax(attn, dim=-1)
-        attn_probs.mul_(127).round_()
-        attn_probs = attn_probs.to(torch.int8)
+        # attn_probs.mul_(127).round_()
+        # attn_probs = attn_probs.to(torch.int8)
 
         # different layout because pv_bmm takes a col major matrix as second
         # arg
@@ -166,7 +161,7 @@ class Int8Attention(nn.Module):
                            # dtype=torch.int8, device='cuda')
         # bnew[:, :, :196] = v
         # anew[:, :, :196] = attn_probs
-        x = attn_probs.float() @ v.float() * self.pv_bmm.a
+        x = attn_probs.float() @ v.float()
         # x = self.pv_bmm(anew, bnew)
 
         x = x.transpose(1,2).reshape(B,N,C)
@@ -226,7 +221,7 @@ class Int8Block(nn.Module):
 
         self.drop_path = DropPath(
             drop_path) if drop_path > 0.0 else nn.Identity()
-        self.norm2 = LayerNormQ(dim)
+        # self.norm2 = LayerNormQ(dim)
         self.mlp = Mlp(
             in_features=dim,
             hidden_features=int(
@@ -259,6 +254,7 @@ class Int8Block(nn.Module):
         int8_module.attn = Int8Attention.from_float(
             module.attn, attn_input_scale, q_output_scale, k_output_scale,
             v_output_scale, proj_input_scale)
+        int8_module.norm2 = module.norm2
         int8_module.mlp = module.mlp
         # int8_module.norm2 = LayerNormQ.from_float(
             # module.norm2, fc1_input_scale)
@@ -272,7 +268,7 @@ class Int8Block(nn.Module):
         return int8_module
 
     def forward(self, x):
-        breakpoint()
+        # breakpoint()
         shortcut = x
         x = self.norm1(x)
         # Window partition
@@ -281,7 +277,7 @@ class Int8Block(nn.Module):
             x, pad_hw = window_partition(x, self.window_size)
 
         x = self.attn(x)  # 2% error
-        breakpoint()
+        # breakpoint()
         # Reverse window partition
         if self.window_size > 0:
             x = window_unpartition(x, self.window_size, pad_hw, (H, W))
@@ -499,7 +495,7 @@ class VITINT8(nn.Module):
         return tuple(outputs)
 
     def forward_features(self, x):
-        breakpoint()
+        # breakpoint()
         x = self.patch_embed(x)
         x = self._pos_embed(x)
         x = self.patch_drop(x)

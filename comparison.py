@@ -90,7 +90,7 @@ def evaluation(model, dataset):
     top1 = AverageMeter()
     breakpoint()
     for idx, data in enumerate(dataset):
-        if idx > 10:
+        if idx > 101:
             break
         imgs, target = data
         imgs = imgs.to(torch.device('cuda'))
@@ -99,7 +99,7 @@ def evaluation(model, dataset):
             pred_target = model(imgs)  # add evaluation component
         prec1, _ = accuracy(pred_target, target, topk=(1,5))
         top1.update(prec1.data.item(), imgs.size(0))
-        if idx % 100 == 0:
+        if idx % 50 == 0:
             print(f"{idx}: {top1.avg:.3f}")
 
 
