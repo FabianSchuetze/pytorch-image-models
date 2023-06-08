@@ -206,7 +206,7 @@ def main():
     model = load()
     # scales = get_quantized_weights(model, dataset)
     # breakpoint()
-    scales = torch.load('/tmp/scales.pt')
+    scales = torch.load('/workspace/scales.pt')
     int8_model = VITINT8.from_float(model, scales)
     int8_model = int8_model.to(torch.device('cuda'))
     evaluation(int8_model, dataset)

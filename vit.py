@@ -129,11 +129,13 @@ class Int8Attention(nn.Module):
                            self.head_dim).transpose(1, 2).contiguous()
 
     def forward(self, x):  # 25x14x14x1024 (for large)
-        # breakpoint()
+        breakpoint()
+        # x2 = torch.zeros((100, 224, 1024), device=x.device, dtype=torch.int8)
+        # x2[:, :197, :] = x
+        # x = x2
         B, N, C = x.shape  # H, W: Number of patches
         q = self.q(x).reshape(B, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        k = self.k(x).reshape(B, N, self.num_heads, self.head_dim)\
-                .permute(0, 2, 1, 3)
+        k = self.k(x).reshape(B, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
         q2 = torch.zeros((100 * 16, 224, 64), dtype=torch.int8, device=k.device)
         k2 = torch.zeros((100 * 16, 224, 64), dtype=torch.int8, device=k.device)
         q2[:, :197, :] = q.reshape(100 * 16, 197, 64)
@@ -158,17 +160,16 @@ class Int8Attention(nn.Module):
                 .permute(0, 2, 1, 3)
         v2 = v.reshape(100 *16, 197, 64)
         attn_probs2 = attn_probs.reshape(100 * 16, 197, 197)
-        x = torch.bmm(attn_probs2.float(), v2.float()).reshape(100, 16, 197, 64) * self.pv_bmm.a
+        # x = torch.bmm(attn_probs2.float(), v2.float()).reshape(100, 16, 197, 64) * self.pv_bmm.a
         # breakpoint()
                 # .reshape(B * self.num_heads, 64, N)
-        # anew = torch.zeros((B * self.num_heads, 224, 224), dtype=torch.int8, device='cuda')
-        # bnew = torch.zeros((B * self.num_heads, 224, 64), dtype=torch.int8, device='cuda')
-        # bnew[:, :197, :64] = v.reshape(100 * 16, 197, 64)
-        # anew[:, :197, :197] = attn_probs.reshape(100 * 16, 197, 197)
-        # x = attn_probs.float() @ v.float() * self.pv_bmm.a
-        x = torch.clamp(x.round(), -128, 127).to(torch.int8)
+        anew = torch.zeros((B * self.num_heads, 224, 224), dtype=torch.int8, device='cuda')
+        bnew = torch.zeros((B * self.num_heads, 64, 224), dtype=torch.int8, device='cuda')
+        bnew[:, :, :197] = v2.transpose(-2, -1)
+        anew[:, :197, :197] = attn_probs2
+        # x = torch.clamp(x.round(), -128, 127).to(torch.int8)
         # breakpoint()
-        # x2 = self.pv_bmm(anew, bnew).reshape(100, 16, 224, 224)[:, :, :197, :64]
+        x = self.pv_bmm(anew, bnew).reshape(100, 16, 224, 64)[:, :, :197, :64]
 
         x = x.transpose(1,2).reshape(B,N,C)
         x = self.proj(x)
