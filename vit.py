@@ -101,19 +101,16 @@ class Int8Attention(nn.Module):
         q_output_scale *= module.scale
         q_module.weight *= module.scale
         q_module.bias *= module.scale
-        # int8_module.q = W8A8B8O8Linear.from_float(
-            # q_module, input_scale, q_output_scale)
-        # int8_module.k = W8A8B8O8Linear.from_float(
-            # k_module, input_scale, k_output_scale)
-        # int8_module.v = W8A8B8O8Linear.from_float(
-            # v_module, input_scale, v_output_scale)
-        int8_module.proj = module.proj
-        int8_module.q = W8A8BFP32OFP32Linear.from_float(
-            q_module, input_scale)
-        int8_module.k = W8A8BFP32OFP32Linear.from_float(
-           k_module, input_scale)
-        int8_module.v = W8A8BFP32OFP32Linear.from_float(
-            v_module, input_scale)
+        int8_module.q = W8A8B8O8Linear.from_float(
+            q_module, input_scale, q_output_scale)
+        int8_module.k = W8A8B8O8Linear.from_float(
+            k_module, input_scale, k_output_scale)
+        int8_module.qk_bmm = BMM_S8T_S8N_F32T.from_scale(
+            q_output_scale, k_output_scale)
+        int8_module.v = W8A8B8O8Linear.from_float(
+            v_module, input_scale, v_output_scale)
+        int8_module.proj = W8A8BFP32OFP32Linear.from_float(
+            module.proj, proj_input_scale)
 
         if int8_module.use_rel_pos:
             int8_module.rel_pos_h = module.rel_pos_h
@@ -121,6 +118,8 @@ class Int8Attention(nn.Module):
             # not sure if the same scales make sense...
 
         # alpha = s_prob * s_v / s_out, where s_prob = 1 / 127
+        # int8_module.pv_bmm = BMM_S8T_S8N_F32T.from_scale(
+            # 1.0 / 127, v_output_scale)
         int8_module.pv_bmm = BMM_S8T_S8N_S8T.from_scale(
             1.0 / 127, v_output_scale, proj_input_scale)
         return int8_module
@@ -130,14 +129,13 @@ class Int8Attention(nn.Module):
                            self.head_dim).transpose(1, 2).contiguous()
 
     def forward(self, x):  # 25x14x14x1024 (for large)
-        # breakpoint()
         B, N, C = x.shape  # H, W: Number of patches
         q = self.q(x).reshape(B, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-                # .reshape(B * self.num_heads, N, -1)
         k = self.k(x).reshape(B, N, self.num_heads, self.head_dim)\
                 .permute(0, 2, 1, 3)
 
-        attn = q.float() @ k.float().transpose(-2,-1)
+        # attn = q.float() @ k.float().transpose(-2,-1)
+        attn = q.float() @ k.float().transpose(-2,-1) * self.qk_bmm.a
         # attn = self.qk_bmm(q, k)
         # attn shape: 400x196x196
 
@@ -146,9 +144,10 @@ class Int8Attention(nn.Module):
                                           self.rel_pos_h, self.rel_pos_w,
                                           (H, W), (H, W))
 
+        breakpoint()
         attn_probs = nn.functional.softmax(attn, dim=-1)
-        # attn_probs.mul_(127).round_()
-        # attn_probs = attn_probs.to(torch.int8)
+        attn_probs.mul_(127).round_()
+        attn_probs = attn_probs.to(torch.int8)
 
         # different layout because pv_bmm takes a col major matrix as second
         # arg
@@ -161,14 +160,12 @@ class Int8Attention(nn.Module):
                            # dtype=torch.int8, device='cuda')
         # bnew[:, :, :196] = v
         # anew[:, :, :196] = attn_probs
-        x = attn_probs.float() @ v.float()
+        x = attn_probs.float() @ v.float() * self.pv_bmm.a
+        x = torch.clamp(x.round(), -128, 127).to(torch.int8)
+        # breakpoint()
         # x = self.pv_bmm(anew, bnew)
 
         x = x.transpose(1,2).reshape(B,N,C)
-
-        # x = x.reshape(B, self.num_heads, H, W, -1)\
-                # .permute(0, 2, 3, 1, 4)\
-                # .reshape(B, H, W, -1)
         x = self.proj(x)
         return x
 
@@ -281,7 +278,7 @@ class Int8Block(nn.Module):
         # Reverse window partition
         if self.window_size > 0:
             x = window_unpartition(x, self.window_size, pad_hw, (H, W))
-        breakpoint()
+        # breakpoint()
 
         x = shortcut + self.drop_path(x)
         x_tmp = x

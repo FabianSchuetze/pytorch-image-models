@@ -103,27 +103,20 @@ def get_quantized_weights(model, dataset):
         if isinstance(x, tuple):
             x = x[0]
         if name not in act_dict or "input" not in act_dict[name]:
-            # breakpoint()
             if not ('mlp.fc2' in name):
                 act_dict[name]["input"] = x.detach().abs().max().item()
-            else: # no bitwaste after GELU
-                # breakpoint()
+            else:  # no bitwaste after GELU
                 act_dict[name]["input"]= [x.detach().min().item(), x.detach().max().item()]
-                # act_dict[name]["input_max"] = x.detach().max().item()
         else:
             if not ('mlp.fc2' in name):
                 act_dict[name]["input"] = max(
                     act_dict[name]["input"], x.detach().abs().max().item())
             else:
-                # breakpoint()
                 tmp_min = x.detach().min().item()
                 tmp_max = x.detach().max().item()
                 new_min = min(act_dict[name]["input"][0], tmp_min)
                 new_max = max(act_dict[name]["input"][1], tmp_max)
                 act_dict[name]["input"] = [new_min, new_max]
-                    # act_dict[name]["input_min"], tmp_min)
-                # act_dict[name]["input_max"] = max(
-                    # act_dict[name]["input_max"], tmp_max)
 
         if isinstance(y, tuple):
             y = y[0]
@@ -207,48 +200,6 @@ def smooth_module(module, x):
     fc1_input_scales = fc1_input_scales.view(-1, 1024).abs().detach()
     fc1_input_scales = torch.max(fc1_input_scales, dim=0)[0]
     smooth_ln_fcs(ffn_ln, fc1, fc1_input_scales, alpha)
-
-
-def generate_activation_scales(module, dataset):
-    module.eval()
-    act_dict = {}
-    for n, m in module.named_modules():
-        if isinstance(m, torch.nn.Linear):
-            m.register_forward_hook(
-                partial(store_act, act_dict=act_dict, name=n))
-    x_scale = x.abs().max() / 127
-    for data in dataset:
-        with torch.no_grad():
-            y = module(data)
-    qkv = act_dict['attn.qkv'][1]
-    out_features = qkv.shape[-1] // 3
-    q_output_scale = qkv[:, :, :, :out_features].abs().max() / 127
-    k_output_scale = qkv[:, :, :, out_features: 2 * out_features].abs().max() / 127
-    v_output_scale = qkv[:, :, :, 2 * out_features: ].abs().max() / 127
-    proj_input_scale = act_dict['attn.proj'][0].abs().max() / 127
-    breakpoint()
-    # fc1_input_scale = 1.0
-    # fc2_input_scale = 1.0
-    fc1_input_scale = act_dict['mlp.fc1'][0].abs().max() / 127
-    fc2_input_scale = act_dict['mlp.fc2'][0].abs().max() / 127
-    block = Int8Block.from_float(module,
-            attn_input_scale=x_scale,
-            q_output_scale=q_output_scale,
-            k_output_scale=k_output_scale,
-            v_output_scale=v_output_scale,
-            proj_input_scale=proj_input_scale,
-            fc1_input_scale=fc1_input_scale,
-            fc2_input_scale=fc2_input_scale)
-    # q_x = (x / x_scale).round().to(torch.int8).to('cuda')
-    y_hat = block(x)
-    breakpoint()
-    diff = y - y_hat
-    return diff
-
-# def compare(attention_orig, attention_new, x):
-    # y_orig = attention_orig(x)
-    # y = attention_new(x)
-    # return y_orig, y
 
 def main():
     dataset = load_val_dataset()
